@@ -1,0 +1,97 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Analytics stack to create EventBridge rule, Lambda function, DynamoDB table, and related permissions."
+
+Parameters:
+  UniquePrefix:
+    Type: String
+    Description: "A unique prefix for naming resources (e.g., project name or a random string)."
+  
+  BatchComputeEnvironmentName:
+    Type: String
+    Description: "The name of the Batch Compute Environment to monitor."
+
+Resources:
+  # DynamoDB Table
+  JobTrackerTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "jobTracker-${UniquePrefix}"
+      AttributeDefinitions:
+        - AttributeName: JobID
+          AttributeType: S
+      KeySchema:
+        - AttributeName: JobID
+          KeyType: HASH
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+
+  # Lambda Execution Role
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "LambdaExecutionRole-${UniquePrefix}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonECS_FullAccess             
+        - arn:aws:iam::aws:policy/AWSBatchFullAccess               
+        - arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess
+        - arn:aws:iam::aws:policy/AmazonEventBridgeFullAccess
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+
+  # Lambda Function
+  JobStateChangeLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "JobStateChangeLambda-${UniquePrefix}"
+      Handler: lambda.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        S3Bucket: "mm-spot-viewer"
+        S3Key: "lambda/function.zip"
+      Runtime: python3.12
+      Timeout: 60
+      Environment:
+        Variables:
+          COMPUTE_ENV_NAME: !Ref BatchComputeEnvironmentName
+          DYNAMODB_TABLE_NAME: !Ref JobTrackerTable
+
+  # EventBridge Rule
+  BatchJobStateChangeRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "BatchJobStateChangeRule-${UniquePrefix}"
+      Description: "Triggers Lambda function on Batch Job State Change"
+      EventPattern:
+        source:
+          - "aws.batch"
+        detail-type:
+          - "Batch Job State Change"
+      Targets:
+        - Arn: !GetAtt JobStateChangeLambda.Arn
+          Id: "JobStateChangeLambdaTarget"
+
+  # Grant EventBridge permission to invoke Lambda
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref JobStateChangeLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt BatchJobStateChangeRule.Arn
+
+Outputs:
+  DynamoDBTableName:
+    Description: "The name of the DynamoDB Table"
+    Value: !Ref JobTrackerTable
+
+  LambdaFunctionName:
+    Description: "The name of the Lambda Function"
+    Value: !Ref JobStateChangeLambda

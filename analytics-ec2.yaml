@@ -1,0 +1,476 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Stack to create an EC2 instance for hosting the MV Spot Viewer with On-Demand and Spot visualizations."
+
+Parameters:
+  UniquePrefix:
+    Type: String
+    Description: "A unique prefix for naming resources (e.g., project name or a random string)."
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: "The VPC ID for the EC2 instance."
+
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: "The Subnet ID for the EC2 instance."
+
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: "The EC2 Key Pair to allow SSH access."
+
+Resources:
+  EC2IAMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: "EC2DynamoDBBatchPricingAccess"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:*
+                  - logs:*
+                  - ec2:*
+                  - ssm:GetParameter
+                  - pricing:GetProducts
+                Resource: "*"
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref EC2IAMRole
+
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security group for the MV Spot Viewer EC2 instance with HTTP and custom port access."
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 5005
+          ToPort: 5005
+          CidrIp: 0.0.0.0/0
+
+  SpotViewerEC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.medium
+      KeyName: !Ref KeyName
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds:
+        - !Ref EC2SecurityGroup
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      ImageId: !Sub "{{resolve:ssm:/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id}}"
+      BlockDeviceMappings:
+        - DeviceName: "/dev/xvda"
+          Ebs:
+            VolumeSize: 30
+            VolumeType: gp3
+            DeleteOnTermination: true
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          apt update -y
+          apt install -y python3-pip python3.10-venv jq
+          mkdir /home/ubuntu/env
+          python3 -m venv /home/ubuntu/env
+          source /home/ubuntu/env/bin/activate
+          export AWS_REGION=$(curl -s http://169.254.169.254/latest/dynamic/instance-identity/document | jq -r '.region')
+          export UNIQUE_PREFIX=${UniquePrefix}
+          pip3 install boto3 flask gunicorn
+
+          # Create directories for the application
+          mkdir -p /home/ubuntu/mv-spot-viewer
+          cd /home/ubuntu/mv-spot-viewer
+
+          # Save the Flask API code
+          cat << 'EOF' > api.py
+          from flask import Flask, jsonify
+          import boto3
+          import json
+          import logging
+          import os
+          from flask import send_from_directory
+          from decimal import Decimal
+          AWS_REGION = os.environ.get("AWS_REGION", "us-west-2")
+          app = Flask(__name__)
+
+          # Boto3 Clients
+          dynamodb = boto3.resource('dynamodb', region_name=AWS_REGION)
+          table = dynamodb.Table("jobTracker-${UniquePrefix}")
+
+          # Logger
+          logging.basicConfig(level=logging.INFO)
+
+
+          def fetch_dynamodb_data():
+              """Fetch all job data from DynamoDB."""
+              return table.scan()["Items"]
+
+
+          def get_pricing(instance_type, region, price_type="OnDemand"):
+              """Fetch pricing information for On-Demand or Spot pricing."""
+              region_mapping = {
+                  "us-east-1": "US East (N. Virginia)",
+                  "us-east-2": "US East (Ohio)",
+                  "us-west-1": "US West (N. California)",
+                  "us-west-2": "US West (Oregon)"
+              }
+
+              if price_type == "Spot":
+                  ec2_client = boto3.client('ec2', region_name=region)
+                  try:
+                      response = ec2_client.describe_spot_price_history(
+                          InstanceTypes=[instance_type],
+                          ProductDescriptions=["Linux/UNIX"],
+                          MaxResults=1
+                      )
+                      if response.get('SpotPriceHistory'):
+                          return float(response['SpotPriceHistory'][0]['SpotPrice'])
+                      else:
+                          logging.warning(f"No spot price data found for instance_type: {instance_type}, region: {region}")
+                          return 0
+                  except Exception as e:
+                      logging.error(f"Error fetching Spot price: {e}")
+                      return 0
+              else:  # On-Demand pricing
+                  pricing_client = boto3.client('pricing', region_name="us-east-1")
+                  try:
+                      response = pricing_client.get_products(
+                          ServiceCode="AmazonEC2",
+                          Filters=[
+                              {"Type": "TERM_MATCH", "Field": "instanceType", "Value": instance_type},
+                              {"Type": "TERM_MATCH", "Field": "location", "Value": region_mapping.get(region, "")},
+                          ]
+                      )
+                      if response['PriceList']:
+                          price_list = json.loads(response['PriceList'][0])
+                          price_dimensions = list(price_list['terms']['OnDemand'].values())[0]['priceDimensions']
+                          return float(list(price_dimensions.values())[0]['pricePerUnit']['USD'])
+                      else:
+                          logging.warning(f"No On-Demand pricing data found for instance_type: {instance_type}, region: {region}")
+                          return 0
+                  except Exception as e:
+                      logging.error(f"Error fetching On-Demand pricing: {e}")
+                      return 0
+
+
+          def calculate_metrics(data, region, cost_type):
+              """Calculate metrics for jobs based on type (On-Demand or Spot)."""
+              metrics = {
+                  "NumberOfJobs": len(data),
+                  "NumberOfRetries": 0,
+                  "TotalRunTime": 0,
+                  "JobQueueName": set(),
+                  "TotalOnDemandCost": 0,
+                  "TotalSpotCost": 0,
+                  "EstimatedSavings": 0,
+              }
+              unique_instances = {}
+
+              # Aggregate job metrics
+              for job in data:
+                  metrics["NumberOfRetries"] += int(job.get("Attempts", 0))
+                  metrics["TotalRunTime"] += int(job.get("RunDurationSeconds", 0))
+                  metrics["JobQueueName"].add(job.get("JobQueue", "Unknown"))
+
+                  # Process instance data
+                  instance_map = job["InstanceMap"] if isinstance(job["InstanceMap"], dict) else json.loads(job["InstanceMap"])
+                  for instance_id, instance_type in instance_map.items():
+                      if instance_id not in unique_instances:
+                          unique_instances[instance_id] = {"type": instance_type, "longest_time": 0}
+                      unique_instances[instance_id]["longest_time"] = max(
+                          unique_instances[instance_id]["longest_time"],
+                          int(job["RunDurationSeconds"])
+                      )
+
+              # Calculate costs
+              for instance_id, details in unique_instances.items():
+                  instance_type = details["type"]
+                  longest_time = details["longest_time"]
+                  on_demand_price = get_pricing(instance_type, region, "OnDemand")
+                  spot_price = get_pricing(instance_type, region, "Spot")
+
+                  metrics["TotalOnDemandCost"] += on_demand_price * (longest_time / 3600)
+                  metrics["TotalSpotCost"] += spot_price * (longest_time / 3600)
+
+              # Calculate savings
+              metrics["EstimatedSavings"] = metrics["TotalOnDemandCost"] - metrics["TotalSpotCost"]
+              metrics["JobQueueName"] = list(metrics["JobQueueName"])  # Convert set to list for JSON serialization
+
+              return metrics
+
+
+          @app.route('/metrics-on-demand', methods=['GET'])
+          def metrics_on_demand():
+              """Metrics for On-Demand usage."""
+              data = fetch_dynamodb_data()
+              metrics = calculate_metrics(data, "us-west-2", "OnDemand")
+              return jsonify(metrics)
+
+
+          @app.route('/metrics-spot', methods=['GET'])
+          def metrics_spot():
+              """Metrics for Spot usage."""
+              data = fetch_dynamodb_data()
+              metrics = calculate_metrics(data, "us-west-2", "Spot")
+              return jsonify(metrics)
+
+          @app.route('/<path:filename>')
+          def serve_static(filename):
+              """Serve static files from the application directory."""
+              return send_from_directory('/home/ubuntu/mv-spot-viewer', filename)
+
+          if __name__ == '__main__':
+              app.run(host="0.0.0.0", port=5005)
+          EOF
+
+          # Save the On-Demand HTML
+          cat << 'EOF' > on-demand.html
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+              <meta charset="UTF-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1.0">
+              <title>MV Spot Viewer - On-Demand</title>
+              <link rel="stylesheet" href="/static/styles.css">
+          </head>
+          <body>
+              <div class="metrics">
+                  <div class="metric">
+                      <h2>Number of Jobs</h2>
+                      <p id="number-of-jobs">--</p>
+                  </div>
+                  <div class="metric">
+                      <h2>Total Retries</h2>
+                      <p id="total-retries">--</p>
+                  </div>
+                  <div class="metric">
+                      <h2>Total Run Time (seconds)</h2>
+                      <p id="total-runtime">--</p>
+                  </div>
+                  <div class="metric">
+                      <h2>Job Queue Name</h2>
+                      <p id="job-queue">--</p>
+                  </div>
+                  <div class="metric">
+                      <h2>Total On-Demand Cost ($)</h2>
+                      <p id="on-demand-cost">--</p>
+                  </div>
+                  <div class="metric">
+                      <h2>Total Spot Cost Estimate ($)</h2>
+                      <p id="spot-cost">--</p>
+                  </div>
+              </div>
+              <p class="note"><em>Note: Costs are rounded to 4 decimal places for clarity.</em></p>
+
+              <script>
+                  // Fetch metrics from Flask backend for On-Demand
+                  async function fetchMetrics() {
+                      try {
+                          const response = await fetch('/metrics-on-demand');
+                          const data = await response.json();
+
+                          // Update UI with metrics
+                          document.getElementById('number-of-jobs').textContent = data.NumberOfJobs;
+                          document.getElementById('total-retries').textContent = data.NumberOfRetries;
+                          document.getElementById('total-runtime').textContent = data.TotalRunTime;
+                          document.getElementById('job-queue').textContent = data.JobQueueName.join(', ');
+                          document.getElementById('on-demand-cost').textContent = data.TotalOnDemandCost.toFixed(4);
+                          document.getElementById('spot-cost').textContent = data.TotalSpotCost.toFixed(4);
+                      } catch (error) {
+                          alert('Failed to load metrics. Please try again later.');
+                          console.error(error);
+                      }
+                  }
+
+                  // Navigation function
+                  function navigateTo(path) {
+                      window.location.href = path;
+                  }
+
+                  // Call fetchMetrics on page load
+                  window.onload = fetchMetrics;
+              </script>
+          </body>
+          </html>
+          EOF
+
+          # Save the Spot HTML
+          cat << 'EOF' > spot.html
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+              <meta charset="UTF-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1.0">
+              <title>MV Spot Viewer - Spot</title>
+              <link rel="stylesheet" href="/static/styles.css">
+          </head>
+          <body>
+              <div class="container">
+                  <p class="disclaimer"><em>Estimates include Spot cost savings.</em></p>
+
+                  <div class="metrics">
+                      <div class="metric">
+                          <h2>Number of Jobs</h2>
+                          <p id="number-of-jobs">--</p>
+                      </div>
+                      <div class="metric">
+                          <h2>Total Retries</h2>
+                          <p id="total-retries">--</p>
+                      </div>
+                      <div class="metric">
+                          <h2>Total Run Time (seconds)</h2>
+                          <p id="total-runtime">--</p>
+                      </div>
+                      <div class="metric">
+                          <h2>Job Queue Name</h2>
+                          <p id="job-queue">--</p>
+                      </div>
+                      <div class="metrics">
+                          <div class="metric">
+                              <h2>Total On-Demand Cost Estimate ($)</h2>
+                              <p id="on-demand-cost">--</p>
+                          </div>
+                          <div class="metric">
+                              <h2>Total Spot Cost ($)</h2>
+                              <p id="spot-cost">--</p>
+                          </div>
+                          <div class="metric">
+                              <h2>Estimated Savings with Spot ($)</h2>
+                              <p id="estimated-savings">--</p>
+                          </div>
+                      </div>
+                      <p class="note"><em>Note: Costs are rounded to 4 decimal places for clarity.</em></p>
+
+                      <script>
+                          // Fetch metrics from Flask backend for Spot
+                          async function fetchMetrics() {
+                              try {
+                                  const response = await fetch('/metrics-spot');
+                                  const data = await response.json();
+
+                                  // Update UI with metrics
+                                  document.getElementById('number-of-jobs').textContent = data.NumberOfJobs;
+                                  document.getElementById('total-retries').textContent = data.NumberOfRetries;
+                                  document.getElementById('total-runtime').textContent = data.TotalRunTime;
+                                  document.getElementById('job-queue').textContent = data.JobQueueName.join(', ');
+                                  document.getElementById('on-demand-cost').textContent = data.TotalOnDemandCost.toFixed(4);
+                                  document.getElementById('spot-cost').textContent = data.TotalSpotCost.toFixed(4);
+                                  document.getElementById('estimated-savings').textContent = data.EstimatedSavings.toFixed(4);
+                              } catch (error) {
+                                  alert('Failed to load metrics. Please try again later.');
+                                  console.error(error);
+                              }
+                          }
+
+                          // Navigation function
+                          function navigateTo(path) {
+                              window.location.href = path;
+                          }
+
+                          // Call fetchMetrics on page load
+                          window.onload = fetchMetrics;
+                      </script>
+          </body>
+          </html>
+          EOF
+
+          # Create a static directory and save styles.css
+          mkdir -p /home/ubuntu/mv-spot-viewer/static
+          cat << 'EOF' > /home/ubuntu/mv-spot-viewer/static/styles.css
+          body {
+              font-family: Arial, sans-serif;
+              background-color: #f4f7f9;
+              color: #333;
+              margin: 0;
+              padding: 0;
+          }
+
+          .container {
+              max-width: 800px;
+              margin: 50px auto;
+              padding: 20px;
+              background-color: #ffffff;
+              box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+              border-radius: 8px;
+          }
+
+          header {
+              text-align: center;
+              margin-bottom: 20px;
+          }
+
+          h1 {
+              color: #0073e6;
+              font-size: 24px;
+          }
+
+          button {
+              background-color: #0073e6;
+              color: white;
+              border: none;
+              padding: 10px 20px;
+              border-radius: 5px;
+              cursor: pointer;
+          }
+
+          button:hover {
+              background-color: #005bb5;
+          }
+
+          .metric {
+              margin-bottom: 15px;
+          }
+
+          .metric h2 {
+              font-size: 18px;
+              color: #555;
+          }
+
+          .metric p {
+              font-size: 16px;
+              color: #333;
+          }
+
+          .disclaimer {
+              font-size: 12px;
+              color: #999;
+              text-align: center;
+              margin-top: 20px;
+          }
+
+          .note {
+              font-size: 14px;
+              color: #666;
+              margin-top: 15px;
+              text-align: center;
+          }
+          EOF
+          # Start the API server
+          gunicorn -w 4 -b 0.0.0.0:5005 api:app
+      Tags:
+        - Key: Name
+          Value: !Sub "MVSpotViewer-${UniquePrefix}"
+
+Outputs:
+  SpotViewerEC2InstanceId:
+    Description: "The ID of the EC2 instance hosting MV Spot Viewer"
+    Value: !Ref SpotViewerEC2Instance
+
+  PublicIP:
+    Description: "The Public IP of the EC2 instance"
+    Value: !GetAtt SpotViewerEC2Instance.PublicIp
