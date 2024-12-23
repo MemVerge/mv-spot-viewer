@@ -3,12 +3,13 @@ import boto3
 import json
 import logging
 from decimal import Decimal
+import pandas as pd
 
 app = Flask(__name__)
 
 # Boto3 Clients
 dynamodb = boto3.resource('dynamodb', region_name='us-west-2')
-table = dynamodb.Table("jobTracker-spot-1")
+table = dynamodb.Table("jobTracker-spot")
 
 # Logger
 logging.basicConfig(level=logging.INFO)
@@ -112,6 +113,34 @@ def calculate_metrics(data, region, cost_type):
     return metrics
 
 
+def calculate_spot_metrics(data):
+    """Calculate enhanced Spot metrics."""
+    df = pd.DataFrame(data)
+    df["RunDurationSeconds"] = df["RunDurationSeconds"].astype(int)
+    df["TotalTimeSaved"] = df["TotalTimeSaved"].fillna("[]")
+
+    def sum_time_saved(time_saved_list):
+        if isinstance(time_saved_list, str) and time_saved_list.strip():
+            try:
+                parsed_list = json.loads(time_saved_list)
+                return sum(int(item["N"]) for item in parsed_list)
+            except (json.JSONDecodeError, KeyError, TypeError):
+                return 0
+        return 0
+
+    df["ParsedTimeSaved"] = df["TotalTimeSaved"].apply(sum_time_saved)
+
+    total_run_time = int(df["RunDurationSeconds"].sum())
+    total_time_saved = int(df["ParsedTimeSaved"].sum())
+    total_run_time_with_memverge = total_run_time - total_time_saved
+
+    return {
+        "TotalRunTimeSpot": total_run_time,
+        "TotalTimeWastedSpot": total_time_saved,
+        "TotalRunTimeWithMemVergeSpot": total_run_time_with_memverge,
+    }
+
+
 @app.route('/metrics-on-demand', methods=['GET'])
 def metrics_on_demand():
     """Metrics for On-Demand usage."""
@@ -122,9 +151,11 @@ def metrics_on_demand():
 
 @app.route('/metrics-spot', methods=['GET'])
 def metrics_spot():
-    """Metrics for Spot usage."""
+    """Metrics for Spot usage with enhanced calculations."""
     data = fetch_dynamodb_data()
+    spot_metrics = calculate_spot_metrics(data)
     metrics = calculate_metrics(data, "us-west-2", "Spot")
+    metrics.update(spot_metrics)
     return jsonify(metrics)
 
 
