@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MV Spot Viewer - Spot</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+ <div style="position: absolute; top: 10px; right: 10px;">
+  <button onclick="showInfo()">ℹ️</button>
+</div>
+  <div class="container">
+   <header>
+       <img src="https://memverge-logo.s3.us-west-2.amazonaws.com/9174147d-41e2-4325-86ff-eea8a26c9656-0.png" alt="Company Logo" style="max-width: 150px;">
+       <h1>MemVerge Spot Viewer - Spot Metrics</h1>
+   </header>
+      <p class="disclaimer"><em>Estimates include Spot cost savings and additional metrics.</em></p>
+
+      <div class="metrics">
+          <div class="metric">
+              <h2>Number of Jobs</h2>
+              <p id="number-of-jobs">--</p>
+          </div>
+          <div class="metric">
+              <h2>Total Retries</h2>
+              <p id="total-retries">--</p>
+          </div>
+          <div class="metric">
+              <h2>Total Run Time without MemVerge Batch Engine (seconds)</h2>
+              <p id="total-runtime-spot">--</p>
+          </div>
+          <div class="metric">
+              <h2>Time Lost due to Spot Reclaims (seconds)</h2>
+              <p id="time-wasted-spot">--</p>
+          </div>
+          <div class="metric">
+              <h2>Total Run Time with MemVerge Batch Engine (seconds)</h2>
+              <p id="total-runtime-memverge">--</p>
+          </div>
+          <div class="metric">
+              <h2>Job Queue Name</h2>
+              <p id="job-queue">--</p>
+          </div>
+          <div class="metrics">
+              <div class="metric">
+                  <h2>Spot Cost without MemVerge ($)</h2>
+                  <p id="cost-without-memverge">--</p>
+              </div>
+              <div class="metric">
+                  <h2>Spot Cost with MemVerge ($)</h2>
+                  <p id="cost-with-memverge">--</p>
+              </div>
+              <div class="metric">
+                  <h2>Estimated Savings with MemVerge ($)</h2>
+                  <p id="savings-with-memverge">--</p>
+              </div>
+          </div>
+         <div style="text-align: center; margin-top: 20px;">
+           <button onclick="window.open('https://memverge.com/memory-machine-checkpoint-engine-for-aws-batch/', '_blank')">
+               Know more about MemVerge Engine
+           </button>
+           <button onclick="window.open('https://calendly.com/jing-memverge/30-minute-mmcloud-demo', '_blank')">
+               Book a Demo
+           </button>
+         </div>
+      </div>
+
+      <p class="note"><em>Note: Costs are rounded to 4 decimal places for clarity.</em></p>
+
+      <script>
+          // Fetch metrics from Flask backend for Spot
+          async function fetchMetrics() {
+              try {
+                  const response = await fetch('/metrics-spot');
+                  const data = await response.json();
+
+                  // Update UI with metrics
+                  document.getElementById('number-of-jobs').textContent = data.NumberOfJobs;
+                  document.getElementById('total-retries').textContent = data.TotalRetries;
+                  document.getElementById('total-runtime-spot').textContent = data.TotalRunTimeSpot;
+                  document.getElementById('time-wasted-spot').textContent = data.TotalTimeWastedSpot;
+                  document.getElementById('total-runtime-memverge').textContent = data.TotalRunTimeWithMemVergeSpot;
+                  document.getElementById('job-queue').textContent = data.JobQueueName.join(', ');
+                  document.getElementById('cost-without-memverge').textContent = data.CostWithoutMemVerge.toFixed(4);
+                  document.getElementById('cost-with-memverge').textContent = data.CostWithMemVerge.toFixed(4);
+                  document.getElementById('savings-with-memverge').textContent = data.SavingsWithMemVerge.toFixed(4);
+              } catch (error) {
+                  alert('Failed to load metrics. Please try again later.');
+                  console.error(error);
+              }
+          }
+
+          // Call fetchMetrics on page load
+          window.onload = fetchMetrics;
+
+          // Information about metrics
+          const spotMetricsInfo = `
+              <ul>
+                  <li><strong>Number of Jobs:</strong> The total number of jobs executed in the system.</li>
+                  <li><strong>Total Retries:</strong> The total number of retries for failed jobs.</li>
+                  <li><strong>Total Run Time without MemVerge Batch Engine:</strong> Total time spent running jobs without MemVerge Checkpoint and Restore Engine.</li>
+                  <li><strong>Time Lost:</strong> Time Lost due to Spot Instance interruptions.</li>
+                  <li><strong>Total Run Time with MemVerge Batch Engine:</strong> Total run time after MemVerge Engine.</li>
+                  <li><strong>Job Queue Name:</strong> The name of the job queues used for execution.</li>
+                  <li><strong>Spot Cost without MemVerge:</strong> Total cost for jobs executed using Spot Instances without MemVerge.</li>
+                  <li><strong>Spot Cost with MemVerge:</strong> Total cost for jobs executed using Spot Instances with MemVerge Engine.</li>
+                  <li><strong>Estimated Savings with MemVerge:</strong> Savings achieved due to MemVerge Engine optimizations.</li>
+              </ul>
+          `;
+
+          function showInfo() {
+              alert(spotMetricsInfo.replace(/<[^>]*>?/gm, ''));
+          }
+      </script>
+  </div>
+</body>
+</html>

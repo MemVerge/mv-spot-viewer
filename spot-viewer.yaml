@@ -115,9 +115,11 @@ Resources:
           # Logger
           logging.basicConfig(level=logging.INFO)
 
+
           def fetch_dynamodb_data():
               """Fetch all job data from DynamoDB."""
               return table.scan()["Items"]
+
 
           def get_pricing(instance_type, region, price_type="OnDemand"):
               """Fetch pricing information for On-Demand or Spot pricing."""
@@ -164,7 +166,6 @@ Resources:
                   except Exception as e:
                       logging.error(f"Error fetching On-Demand pricing: {e}")
                       return 0
-
           def calculate_metrics(data, region, cost_type):
               """Calculate metrics for jobs based on type (On-Demand or Spot)."""
               metrics = {
@@ -210,32 +211,93 @@ Resources:
 
               return metrics
 
+
           def calculate_spot_metrics(data):
-              """Calculate enhanced Spot metrics."""
+              """Calculate Spot metrics with MemVerge enhancements."""
               df = pd.DataFrame(data)
               df["RunDurationSeconds"] = df["RunDurationSeconds"].astype(int)
               df["TotalTimeSaved"] = df["TotalTimeSaved"].fillna("[]")
 
-              def sum_time_saved(time_saved_list):
-                  if isinstance(time_saved_list, str) and time_saved_list.strip():
-                      try:
-                          parsed_list = json.loads(time_saved_list)
-                          return sum(int(item["N"]) for item in parsed_list)
-                      except (json.JSONDecodeError, KeyError, TypeError):
-                          return 0
-                  return 0
-
+              # Parse TotalTimeSaved
               df["ParsedTimeSaved"] = df["TotalTimeSaved"].apply(sum_time_saved)
 
-              total_run_time = int(df["RunDurationSeconds"].sum())
-              total_time_saved = int(df["ParsedTimeSaved"].sum())
-              total_run_time_with_memverge = total_run_time - total_time_saved
+              # Aggregate metrics for each unique instance
+              unique_instances = {}
+              total_retries = 0
+              job_queues = set()
+
+              for _, row in df.iterrows():
+                  instance_map = json.loads(row["InstanceMap"]) if isinstance(row["InstanceMap"], str) else row["InstanceMap"]
+                  runtime = row["RunDurationSeconds"]
+                  time_saved = row["ParsedTimeSaved"]
+                  retries = int(row.get("Attempts", 0))
+                  total_retries += retries
+
+                  job_queue = row.get("JobQueue", "Unknown")
+                  job_queues.add(job_queue)
+
+                  for instance_id, instance_type in instance_map.items():
+                      if instance_id not in unique_instances:
+                          unique_instances[instance_id] = {"type": instance_type, "total_runtime": 0, "saved_time": 0}
+                      unique_instances[instance_id]["total_runtime"] += runtime
+                      unique_instances[instance_id]["saved_time"] += time_saved
+
+              # Calculate costs and runtimes
+              cost_without_memverge = 0
+              cost_with_memverge = 0
+              total_runtime_spot = 0
+              total_runtime_with_memverge = 0
+
+              for instance_id, details in unique_instances.items():
+                  instance_type = details["type"]
+                  total_runtime = details["total_runtime"]
+                  saved_time = details["saved_time"]
+
+                  spot_price = get_pricing(instance_type, "us-west-2", "Spot")
+
+                  # Calculate runtimes
+                  adjusted_runtime = max(total_runtime - saved_time, 0)
+                  total_runtime_spot += total_runtime
+                  total_runtime_with_memverge += adjusted_runtime
+
+                  # Calculate costs
+                  cost_without_memverge += spot_price * (total_runtime / 3600)
+                  cost_with_memverge += spot_price * (adjusted_runtime / 3600)
 
               return {
-                  "TotalRunTimeSpot": total_run_time,
-                  "TotalTimeWastedSpot": total_time_saved,
-                  "TotalRunTimeWithMemVergeSpot": total_run_time_with_memverge,
+                  "NumberOfJobs": len(df),
+                  "TotalRetries": total_retries,
+                  "TotalRunTimeSpot": total_runtime_spot,
+                  "TotalTimeWastedSpot": total_runtime_spot - total_runtime_with_memverge,
+                  "TotalRunTimeWithMemVergeSpot": total_runtime_with_memverge,
+                  "JobQueueName": list(job_queues),
+                  "CostWithoutMemVerge": cost_without_memverge,
+                  "CostWithMemVerge": cost_with_memverge,
+                  "SavingsWithMemVerge": cost_without_memverge - cost_with_memverge,
               }
+
+
+          def sum_time_saved(time_saved_list):
+              """Sum time saved from TotalTimeSaved column."""
+              try:
+                  # If it's a string, try to parse it as JSON
+                  if isinstance(time_saved_list, str):
+                      parsed_list = json.loads(time_saved_list)
+                      if isinstance(parsed_list, list):
+                          return sum(int(item["N"]) for item in parsed_list if isinstance(item, dict) and "N" in item)
+                  elif isinstance(time_saved_list, list):
+                      return sum(
+                          int(item["N"]) if isinstance(item, dict) and "N" in item else int(item)
+                          for item in time_saved_list
+                          if isinstance(item, (dict, Decimal, int))
+                      )
+                  elif isinstance(time_saved_list, Decimal):
+                      return int(time_saved_list)
+                  elif isinstance(time_saved_list, int):
+                      return time_saved_list
+              except Exception as e:
+                  logging.error(f"Unexpected error while summing TotalTimeSaved: {time_saved_list}, Error: {e}")
+              return 0
 
           @app.route('/metrics-on-demand', methods=['GET'])
           def metrics_on_demand():
@@ -246,270 +308,24 @@ Resources:
 
           @app.route('/metrics-spot', methods=['GET'])
           def metrics_spot():
-              """Metrics for Spot usage with enhanced calculations."""
+              """Metrics for Spot usage with MemVerge enhancements."""
               data = fetch_dynamodb_data()
               spot_metrics = calculate_spot_metrics(data)
-              metrics = calculate_metrics(data, "us-west-2", "Spot")
-              metrics.update(spot_metrics)
-              return jsonify(metrics)
+              return jsonify(spot_metrics)
+
+
           @app.route('/<path:filename>')
           def serve_static(filename):
               return send_from_directory('/home/ubuntu/mv-spot-viewer', filename)
 
+
           if __name__ == '__main__':
               app.run(host="0.0.0.0", port=5005)
           EOF
-
-          # Save the On-Demand HTML
-          cat << 'EOF' > on-demand.html
-          <!DOCTYPE html>
-          <html lang="en">
-          <head>
-              <meta charset="UTF-8">
-              <meta name="viewport" content="width=device-width, initial-scale=1.0">
-              <title>MV Spot Viewer - On-Demand</title>
-              <link rel="stylesheet" href="/static/styles.css">
-          </head>
-          <body>
-             <div class="container">
-               <header>
-                   <img src="https://memverge-logo.s3.us-west-2.amazonaws.com/9174147d-41e2-4325-86ff-eea8a26c9656-0.png" alt="Company Logo" style="max-width: 150px;">
-                   <h1>MemVerge Spot Viewer - On-Demand Metrics</h1>
-               </header>
-                 <div class="metrics">
-                    <div class="metric">
-                        <h2>Number of Jobs</h2>
-                        <p id="number-of-jobs">--</p>
-                    </div>
-                    <div class="metric">
-                        <h2>Total Retries</h2>
-                        <p id="total-retries">--</p>
-                    </div>
-                    <div class="metric">
-                        <h2>Total Run Time (seconds)</h2>
-                        <p id="total-runtime">--</p>
-                    </div>
-                    <div class="metric">
-                        <h2>Job Queue Name</h2>
-                        <p id="job-queue">--</p>
-                    </div>
-                    <div class="metric">
-                        <h2>Total On-Demand Cost ($)</h2>
-                        <p id="on-demand-cost">--</p>
-                    </div>
-                    <div class="metric">
-                        <h2>Total Spot Cost Estimate ($)</h2>
-                        <p id="spot-cost">--</p>
-                    </div>
-                 </div>
-              </div>
-              <p class="note"><em>Note: Costs are rounded to 4 decimal places for clarity.</em></p>
-
-              <script>
-                  // Fetch metrics from Flask backend for On-Demand
-                  async function fetchMetrics() {
-                      try {
-                          const response = await fetch('/metrics-on-demand');
-                          const data = await response.json();
-
-                          // Update UI with metrics
-                          document.getElementById('number-of-jobs').textContent = data.NumberOfJobs;
-                          document.getElementById('total-retries').textContent = data.NumberOfRetries;
-                          document.getElementById('total-runtime').textContent = data.TotalRunTime;
-                          document.getElementById('job-queue').textContent = data.JobQueueName.join(', ');
-                          document.getElementById('on-demand-cost').textContent = data.TotalOnDemandCost.toFixed(4);
-                          document.getElementById('spot-cost').textContent = data.TotalSpotCost.toFixed(4);
-                      } catch (error) {
-                          alert('Failed to load metrics. Please try again later.');
-                          console.error(error);
-                      }
-                  }
-
-                  // Navigation function
-                  function navigateTo(path) {
-                      window.location.href = path;
-                  }
-
-                  // Call fetchMetrics on page load
-                  window.onload = fetchMetrics;
-              </script>
-          </body>
-          </html>
-          EOF
-
-          # Save the Spot HTML
-          cat << 'EOF' > spot.html
-          <!DOCTYPE html>
-          <html lang="en">
-          <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>MV Spot Viewer - Spot</title>
-            <link rel="stylesheet" href="/static/styles.css">
-          </head>
-          <body>
-            <div class="container">
-             <header>
-                 <img src="https://memverge-logo.s3.us-west-2.amazonaws.com/9174147d-41e2-4325-86ff-eea8a26c9656-0.png" alt="Company Logo" style="max-width: 150px;">
-                 <h1>MemVerge Spot Viewer - Spot Metrics</h1>
-             </header>
-                <p class="disclaimer"><em>Estimates include Spot cost savings and additional metrics.</em></p>
-
-                <div class="metrics">
-                    <div class="metric">
-                        <h2>Number of Jobs</h2>
-                        <p id="number-of-jobs">--</p>
-                    </div>
-                    <div class="metric">
-                        <h2>Total Retries</h2>
-                        <p id="total-retries">--</p>
-                    </div>
-                    <div class="metric">
-                        <h2>Total Run Time (seconds)</h2>
-                        <p id="total-runtime">--</p>
-                    </div>
-                    <div class="metric">
-                        <h2>Total Run Time (Spot)</h2>
-                        <p id="total-runtime-spot">--</p>
-                    </div>
-                    <div class="metric">
-                        <h2>Time Wasted Due to Spot Interruptions (seconds)</h2>
-                        <p id="time-wasted-spot">--</p>
-                    </div>
-                    <div class="metric">
-                        <h2>Total Run Time with MemVerge Batch Engine (seconds)</h2>
-                        <p id="total-runtime-memverge">--</p>
-                    </div>
-                    <div class="metric">
-                        <h2>Job Queue Name</h2>
-                        <p id="job-queue">--</p>
-                    </div>
-                    <div class="metrics">
-                        <div class="metric">
-                            <h2>Total On-Demand Cost Estimate ($)</h2>
-                            <p id="on-demand-cost">--</p>
-                        </div>
-                        <div class="metric">
-                            <h2>Total Spot Cost ($)</h2>
-                            <p id="spot-cost">--</p>
-                        </div>
-                        <div class="metric">
-                            <h2>Estimated Savings with Spot ($)</h2>
-                            <p id="estimated-savings">--</p>
-                        </div>
-                    </div>
-                </div>
-
-                <p class="note"><em>Note: Costs are rounded to 4 decimal places for clarity.</em></p>
-
-                <script>
-                    // Fetch metrics from Flask backend for Spot
-                    async function fetchMetrics() {
-                        try {
-                            const response = await fetch('/metrics-spot');
-                            const data = await response.json();
-
-                            // Update UI with metrics
-                            document.getElementById('number-of-jobs').textContent = data.NumberOfJobs;
-                            document.getElementById('total-retries').textContent = data.NumberOfRetries;
-                            document.getElementById('total-runtime').textContent = data.TotalRunTime;
-                            document.getElementById('total-runtime-spot').textContent = data.TotalRunTimeSpot;
-                            document.getElementById('time-wasted-spot').textContent = data.TotalTimeWastedSpot;
-                            document.getElementById('total-runtime-memverge').textContent = data.TotalRunTimeWithMemVergeSpot;
-                            document.getElementById('job-queue').textContent = data.JobQueueName.join(', ');
-                            document.getElementById('on-demand-cost').textContent = data.TotalOnDemandCost.toFixed(4);
-                            document.getElementById('spot-cost').textContent = data.TotalSpotCost.toFixed(4);
-                            document.getElementById('estimated-savings').textContent = data.EstimatedSavings.toFixed(4);
-                        } catch (error) {
-                            alert('Failed to load metrics. Please try again later.');
-                            console.error(error);
-                        }
-                    }
-
-                    // Navigation function
-                    function navigateTo(path) {
-                        window.location.href = path;
-                    }
-
-                    // Call fetchMetrics on page load
-                    window.onload = fetchMetrics;
-                </script>
-            </div>
-          </body>
-          </html>
-          EOF
-
-          # Create a static directory and save styles.css
           mkdir -p /home/ubuntu/mv-spot-viewer/static
-          cat << 'EOF' > /home/ubuntu/mv-spot-viewer/static/styles.css
-          body {
-              font-family: Arial, sans-serif;
-              background-color: #f4f7f9;
-              color: #333;
-              margin: 0;
-              padding: 0;
-          }
-
-          .container {
-              max-width: 800px;
-              margin: 50px auto;
-              padding: 20px;
-              background-color: #ffffff;
-              box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-              border-radius: 8px;
-          }
-
-          header {
-              text-align: center;
-              margin-bottom: 20px;
-          }
-
-          h1 {
-              color: #0073e6;
-              font-size: 24px;
-          }
-
-          button {
-              background-color: #0073e6;
-              color: white;
-              border: none;
-              padding: 10px 20px;
-              border-radius: 5px;
-              cursor: pointer;
-          }
-
-          button:hover {
-              background-color: #005bb5;
-          }
-
-          .metric {
-              margin-bottom: 15px;
-          }
-
-          .metric h2 {
-              font-size: 18px;
-              color: #555;
-          }
-
-          .metric p {
-              font-size: 16px;
-              color: #333;
-          }
-
-          .disclaimer {
-              font-size: 12px;
-              color: #999;
-              text-align: center;
-              margin-top: 20px;
-          }
-
-          .note {
-              font-size: 14px;
-              color: #666;
-              margin-top: 15px;
-              text-align: center;
-          }
-          EOF
+          curl -o /home/ubuntu/mv-spot-viewer/spot.html https://memverge-logo.s3.us-west-2.amazonaws.com/spot.html
+          curl -o /home/ubuntu/mv-spot-viewer/on-demand.html https://memverge-logo.s3.us-west-2.amazonaws.com/on-demand.html
+          curl -o /home/ubuntu/mv-spot-viewer/static/styles.css https://memverge-logo.s3.us-west-2.amazonaws.com/styles.css
           # Start the API server
           gunicorn -w 4 -b 0.0.0.0:5005 api:app
       Tags:

@@ -4,12 +4,13 @@ import json
 import logging
 from decimal import Decimal
 import pandas as pd
+from flask import send_from_directory
 
 app = Flask(__name__)
 
 # Boto3 Clients
 dynamodb = boto3.resource('dynamodb', region_name='us-west-2')
-table = dynamodb.Table("jobTracker-spot")
+table = dynamodb.Table("jobTracker-${UniquePrefix}")
 
 # Logger
 logging.basicConfig(level=logging.INFO)
@@ -65,8 +66,6 @@ def get_pricing(instance_type, region, price_type="OnDemand"):
         except Exception as e:
             logging.error(f"Error fetching On-Demand pricing: {e}")
             return 0
-
-
 def calculate_metrics(data, region, cost_type):
     """Calculate metrics for jobs based on type (On-Demand or Spot)."""
     metrics = {
@@ -114,32 +113,91 @@ def calculate_metrics(data, region, cost_type):
 
 
 def calculate_spot_metrics(data):
-    """Calculate enhanced Spot metrics."""
+    """Calculate Spot metrics with MemVerge enhancements."""
     df = pd.DataFrame(data)
     df["RunDurationSeconds"] = df["RunDurationSeconds"].astype(int)
     df["TotalTimeSaved"] = df["TotalTimeSaved"].fillna("[]")
 
-    def sum_time_saved(time_saved_list):
-        if isinstance(time_saved_list, str) and time_saved_list.strip():
-            try:
-                parsed_list = json.loads(time_saved_list)
-                return sum(int(item["N"]) for item in parsed_list)
-            except (json.JSONDecodeError, KeyError, TypeError):
-                return 0
-        return 0
-
+    # Parse TotalTimeSaved
     df["ParsedTimeSaved"] = df["TotalTimeSaved"].apply(sum_time_saved)
 
-    total_run_time = int(df["RunDurationSeconds"].sum())
-    total_time_saved = int(df["ParsedTimeSaved"].sum())
-    total_run_time_with_memverge = total_run_time - total_time_saved
+    # Aggregate metrics for each unique instance
+    unique_instances = {}
+    total_retries = 0
+    job_queues = set()
+
+    for _, row in df.iterrows():
+        instance_map = json.loads(row["InstanceMap"]) if isinstance(row["InstanceMap"], str) else row["InstanceMap"]
+        runtime = row["RunDurationSeconds"]
+        time_saved = row["ParsedTimeSaved"]
+        retries = int(row.get("Attempts", 0))
+        total_retries += retries
+
+        job_queue = row.get("JobQueue", "Unknown")
+        job_queues.add(job_queue)
+
+        for instance_id, instance_type in instance_map.items():
+            if instance_id not in unique_instances:
+                unique_instances[instance_id] = {"type": instance_type, "total_runtime": 0, "saved_time": 0}
+            unique_instances[instance_id]["total_runtime"] += runtime
+            unique_instances[instance_id]["saved_time"] += time_saved
+
+    # Calculate costs and runtimes
+    cost_without_memverge = 0
+    cost_with_memverge = 0
+    total_runtime_spot = 0
+    total_runtime_with_memverge = 0
+
+    for instance_id, details in unique_instances.items():
+        instance_type = details["type"]
+        total_runtime = details["total_runtime"]
+        saved_time = details["saved_time"]
+
+        spot_price = get_pricing(instance_type, "us-west-2", "Spot")
+
+        # Calculate runtimes
+        adjusted_runtime = max(total_runtime - saved_time, 0)
+        total_runtime_spot += total_runtime
+        total_runtime_with_memverge += adjusted_runtime
+
+        # Calculate costs
+        cost_without_memverge += spot_price * (total_runtime / 3600)
+        cost_with_memverge += spot_price * (adjusted_runtime / 3600)
 
     return {
-        "TotalRunTimeSpot": total_run_time,
-        "TotalTimeWastedSpot": total_time_saved,
-        "TotalRunTimeWithMemVergeSpot": total_run_time_with_memverge,
+        "NumberOfJobs": len(df),
+        "TotalRetries": total_retries,
+        "TotalRunTimeSpot": total_runtime_spot,
+        "TotalTimeWastedSpot": total_runtime_spot - total_runtime_with_memverge,
+        "TotalRunTimeWithMemVergeSpot": total_runtime_with_memverge,
+        "JobQueueName": list(job_queues),
+        "CostWithoutMemVerge": cost_without_memverge,
+        "CostWithMemVerge": cost_with_memverge,
+        "SavingsWithMemVerge": cost_without_memverge - cost_with_memverge,
     }
 
+
+def sum_time_saved(time_saved_list):
+    """Sum time saved from TotalTimeSaved column."""
+    try:
+        # If it's a string, try to parse it as JSON
+        if isinstance(time_saved_list, str):
+            parsed_list = json.loads(time_saved_list)
+            if isinstance(parsed_list, list):
+                return sum(int(item["N"]) for item in parsed_list if isinstance(item, dict) and "N" in item)
+        elif isinstance(time_saved_list, list):
+            return sum(
+                int(item["N"]) if isinstance(item, dict) and "N" in item else int(item)
+                for item in time_saved_list
+                if isinstance(item, (dict, Decimal, int))
+            )
+        elif isinstance(time_saved_list, Decimal):
+            return int(time_saved_list)
+        elif isinstance(time_saved_list, int):
+            return time_saved_list
+    except Exception as e:
+        logging.error(f"Unexpected error while summing TotalTimeSaved: {time_saved_list}, Error: {e}")
+    return 0
 
 @app.route('/metrics-on-demand', methods=['GET'])
 def metrics_on_demand():
@@ -148,15 +206,17 @@ def metrics_on_demand():
     metrics = calculate_metrics(data, "us-west-2", "OnDemand")
     return jsonify(metrics)
 
-
 @app.route('/metrics-spot', methods=['GET'])
 def metrics_spot():
-    """Metrics for Spot usage with enhanced calculations."""
+    """Metrics for Spot usage with MemVerge enhancements."""
     data = fetch_dynamodb_data()
     spot_metrics = calculate_spot_metrics(data)
-    metrics = calculate_metrics(data, "us-west-2", "Spot")
-    metrics.update(spot_metrics)
-    return jsonify(metrics)
+    return jsonify(spot_metrics)
+
+
+@app.route('/<path:filename>')
+def serve_static(filename):
+    return send_from_directory('/home/ubuntu/mv-spot-viewer', filename)
 
 
 if __name__ == '__main__':

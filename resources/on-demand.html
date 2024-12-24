@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MV Spot Viewer - On-Demand</title>
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <div style="position: absolute; top: 10px; right: 10px;">
+        <button onclick="showInfo()">ℹ️</button>
+    </div>
+    <div class="container">
+        <header>
+            <img src="https://memverge-logo.s3.us-west-2.amazonaws.com/9174147d-41e2-4325-86ff-eea8a26c9656-0.png" alt="Company Logo" style="max-width: 150px;">
+            <h1>MemVerge Spot Viewer - On-Demand Metrics</h1>
+        </header>
+        <div class="metrics">
+            <div class="metric">
+                <h2>Number of Jobs</h2>
+                <p id="number-of-jobs">--</p>
+            </div>
+            <div class="metric">
+                <h2>Total Retries</h2>
+                <p id="total-retries">--</p>
+            </div>
+            <div class="metric">
+                <h2>Total Run Time (seconds)</h2>
+                <p id="total-runtime">--</p>
+            </div>
+            <div class="metric">
+                <h2>Job Queue Name</h2>
+                <p id="job-queue">--</p>
+            </div>
+            <div class="metric">
+                <h2>Total On-Demand Cost ($)</h2>
+                <p id="on-demand-cost">--</p>
+            </div>
+            <div class="metric">
+                <h2>Total Spot Cost Estimate ($)</h2>
+                <p id="spot-cost">--</p>
+            </div>
+        </div>
+        <div style="text-align: center; margin-top: 20px;">
+            <button onclick="window.open('https://memverge.com/memory-machine-checkpoint-engine-for-aws-batch/', '_blank')">
+                Know more about MemVerge Engine
+            </button>
+            <button onclick="window.open('https://calendly.com/jing-memverge/30-minute-mmcloud-demo', '_blank')">
+                Book a Demo
+            </button>
+        </div>
+    </div>
+    <p class="note"><em>Note: Costs are rounded to 4 decimal places for clarity.</em></p>
+
+    <script>
+        // Fetch metrics from Flask backend for On-Demand
+        async function fetchMetrics() {
+            try {
+                const response = await fetch('/metrics-on-demand');
+                const data = await response.json();
+
+                // Update UI with metrics
+                document.getElementById('number-of-jobs').textContent = data.NumberOfJobs;
+                document.getElementById('total-retries').textContent = data.NumberOfRetries;
+                document.getElementById('total-runtime').textContent = data.TotalRunTime;
+                document.getElementById('job-queue').textContent = data.JobQueueName.join(', ');
+                document.getElementById('on-demand-cost').textContent = data.TotalOnDemandCost.toFixed(4);
+                document.getElementById('spot-cost').textContent = data.TotalSpotCost.toFixed(4);
+            } catch (error) {
+                alert('Failed to load metrics. Please try again later.');
+                console.error(error);
+            }
+        }
+
+        // Call fetchMetrics on page load
+        window.onload = fetchMetrics;
+
+        // Show Info Modal
+        function showInfo() {
+            const modal = document.getElementById("info-modal");
+            const description = document.getElementById("info-description");
+            description.innerHTML = `
+                <ul>
+                    <li><strong>Number of Jobs:</strong> The total number of jobs executed in the system.</li>
+                    <li><strong>Total Retries:</strong> The total number of retries for failed jobs.</li>
+                    <li><strong>Total Run Time (seconds):</strong> The total time spent running jobs.</li>
+                    <li><strong>Job Queue Name:</strong> The name of the job queues used for execution.</li>
+                    <li><strong>Total On-Demand Cost ($):</strong> Cost estimate for jobs run using On-Demand Instances.</li>
+                    <li><strong>Total Spot Cost Estimate ($):</strong> Cost estimate if Spot Instances were used instead of On-Demand Instances.</li>
+                </ul>
+            `;
+            modal.style.display = "block";
+        }
+
+        // Close Info Modal
+        function closeModal() {
+            const modal = document.getElementById("info-modal");
+            modal.style.display = "none";
+        }
+    </script>
+
+    <div id="info-modal" class="modal" style="display:none;">
+        <div class="modal-content">
+            <span class="close-btn" onclick="closeModal()">&times;</span>
+            <h2>On-Demand Metrics Information</h2>
+            <p id="info-description"></p>
+        </div>
+    </div>
+</body>
+</html>

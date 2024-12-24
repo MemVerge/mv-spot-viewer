@@ -1,0 +1,99 @@
+body {
+ font-family: Arial, sans-serif;
+ background-color: #f4f7f9;
+ color: #333;
+ margin: 0;
+ padding: 0;
+}
+
+.container {
+ max-width: 800px;
+ margin: 50px auto;
+ padding: 20px;
+ background-color: #ffffff;
+ box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+ border-radius: 8px;
+}
+
+header {
+ text-align: center;
+ margin-bottom: 20px;
+}
+
+h1 {
+ color: #0073e6;
+ font-size: 24px;
+}
+
+button {
+ background-color: #0073e6;
+ color: white;
+ border: none;
+ padding: 10px 20px;
+ border-radius: 5px;
+ cursor: pointer;
+}
+
+button:hover {
+ background-color: #005bb5;
+}
+
+.metric {
+ margin-bottom: 15px;
+}
+
+.metric h2 {
+ font-size: 18px;
+ color: #555;
+}
+
+.metric p {
+ font-size: 16px;
+ color: #333;
+}
+
+.disclaimer {
+ font-size: 12px;
+ color: #999;
+ text-align: center;
+ margin-top: 20px;
+}
+
+.note {
+ font-size: 14px;
+ color: #666;
+ margin-top: 15px;
+ text-align: center;
+}
+.modal {
+ position: fixed;
+ top: 0;
+ left: 0;
+ width: 100%;
+ height: 100%;
+ background: rgba(0, 0, 0, 0.5);
+ display: flex;
+ align-items: center;
+ justify-content: center;
+ z-index: 1000;
+}
+
+.modal-content {
+ background: #fff;
+ padding: 20px;
+ border-radius: 8px;
+ width: 90%;
+ max-width: 400px;
+ text-align: center;
+ position: relative;
+}
+
+.close-btn {
+ position: absolute;
+ top: 10px;
+ right: 10px;
+ font-size: 20px;
+ cursor: pointer;
+ background: none;
+ border: none;
+}
