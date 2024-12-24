@@ -1,142 +1,85 @@
 # mv-spot-viewer
 
-# `/metrics-on-demand` API Documentation
 
-## Description
-This endpoint provides metrics for AWS Batch users running completely on-demand. It extracts data from DynamoDB to calculate various metrics, including job counts, retries, and costs.
+## Overview
 
----
-
-## API: `/metrics-on-demand`
-
-### Response Format
-The API returns the following metrics in JSON format:
-
-| Field                 | Description                                                                                  |
-|-----------------------|----------------------------------------------------------------------------------------------|
-| `NumberOfJobs`        | Count of all job entries (`JobID`).                                                          |
-| `NumberOfRetries`     | Sum of the `Attempts` column.                                                                |
-| `TotalRunTime`        | Total run time in seconds (`RunDurationSeconds`).                                            |
-| `JobQueueName`        | Unique job queue name(s) from `JobQueue`.                                                    |
-| `TotalOnDemandCost`   | Total cost of running jobs on On-Demand instances (USD).                                     |
-| `TotalSpotCost`       | Estimated total cost if jobs were run on Spot Instances (USD).                               |
+This project provides a two-step process to analyze and visualize AWS Batch workloads. It includes:
+1. **Analytics Stack**: Captures job metrics and insights from AWS Batch and stores them in DynamoDB.
+2. **Spot Viewer Stack (Optional)**: Visualizes On-Demand vs. Spot cost insights for AWS Batch jobs, helping optimize workloads.
 
 ---
 
-### Calculations
+## **Stack 1: Analytics for AWS Batch**
 
-#### **1. Total On-Demand Cost (USD)**
+### Purpose:
+- Monitor AWS Batch jobs and collect insights such as instance IDs, retries, interruptions, and runtime into DynamoDB.
 
-Cost = Sum of (On-Demand Price (USD/hour) * (Longest Run Duration (seconds) / 3600)) for all instances.
+### Features:
+- **EventBridge Rule**: Triggers a Lambda function for Batch job state changes.
+- **Lambda Function**: Processes job data from AWS Batch and ECS, then stores it in DynamoDB.
 
-- Extract **unique `InstanceIDs`** and their corresponding `InstanceTypes` from `InstanceMap`.
-- Obtain the **longest `RunDurationSeconds`** for each `InstanceID`.
-- Multiply by the **On-Demand price** for the region.
+### Deployment Parameters:
+- **`UniquePrefix`**: A unique prefix for resource naming (e.g., `project-name` or a random string).
+- **`BatchComputeEnvironmentName`**: Name of the AWS Batch Compute Environment to monitor.
 
-#### **2. Total Spot Cost (USD)**
-
-Total Spot Cost (USD):
-Cost = Sum of (Spot Price * (Longest Run Duration (seconds) / 3600)) for all instances.
-
-- Extract **unique `InstanceIDs`** and their `InstanceTypes` from `InstanceMap`.
-- Multiply the **longest `RunDurationSeconds`** by the **average Spot price** for the region.
-
----
-
-### Example Response
-
-```json
-{
-  "NumberOfJobs": 150,
-  "NumberOfRetries": 20,
-  "TotalRunTime": 360000,
-  "JobQueueName": ["HighPriorityQueue"],
-  "TotalOnDemandCost": 120.50,
-  "TotalSpotCost": 32.15
-}
-```
-Notes
-- All monetary values are rounded to two decimal places for better readability.
-- Job Queue Name(s) are returned as a list of unique strings.
+### Outputs:
+- **`DynamoDBTableName`**: Name of the DynamoDB table storing job metrics.
+- **`LambdaFunctionName`**: Name of the Lambda function processing job state changes.
 
 ---
 
-#### **`metrics-spot.md`**
+## **Stack 2: Spot Viewer (Optional)**
 
-```markdown
-# `/metrics-spot` API Documentation
+### Purpose:
+- Provides visual insights into AWS Batch workloads, comparing On-Demand and Spot costs with MemVerge enhancements.
 
-## Description
-This endpoint provides metrics for AWS Batch users running completely on Spot Instances. It calculates costs, savings, and other metrics based on DynamoDB data.
+### Features:
+- Deploys an EC2 instance hosting a Flask-based web application.
+- Two visualization options:
+  - **On-Demand Metrics**: `/on-demand.html`
+  - **Spot Metrics with MemVerge Enhancements**: `/spot.html`
+- Cost analysis for AWS Batch jobs:
+  - On-Demand vs. Spot.
+  - Savings potential with MemVerge.
 
----
+### Deployment Parameters:
+- **`UniquePrefix`**: The same prefix used in Stack 1 for consistent integration.
+- **`VpcId`**: VPC ID for the EC2 instance.
+- **`SubnetId`**: Subnet ID for the EC2 instance.
+- **`KeyName`**: Key Pair for SSH access.
 
-## API: `/metrics-spot`
-
-### Response Format
-The API returns the following metrics in JSON format:
-
-| Field                   | Description                                                                                  |
-|-------------------------|----------------------------------------------------------------------------------------------|
-| `NumberOfJobs`          | Count of all job entries (`JobID`).                                                          |
-| `NumberOfRetries`       | Sum of the `Attempts` column.                                                                |
-| `TotalRunTime`          | Total run time in seconds (`RunDurationSeconds`).                                            |
-| `JobQueueName`          | Unique job queue name(s) from `JobQueue`.                                                    |
-| `TotalOnDemandCost`     | Estimated cost of running jobs on On-Demand instances (USD).                                 |
-| `TotalSpotCost`         | Total cost of running jobs on Spot Instances (USD).                                          |
-| `EstimatedCostSaving`   | Cost savings achieved by using Spot Instances over On-Demand instances (USD).                |
-
----
-
-### Calculations
-
-#### **1. Total On-Demand Cost (USD) (Estimate)**
-
-Total On-Demand Cost (USD):
-Cost = Sum of (On-Demand Price (USD/hour) * (Longest Run Duration (seconds) / 3600)) for all instances.
-
-- Extract **unique `InstanceIDs`** and their corresponding `InstanceTypes` from `InstanceMap`.
-- Obtain the **longest `RunDurationSeconds`** for each `InstanceID`.
-- Multiply by the **On-Demand price** for the region.
-
-#### **2. Total Spot Cost (USD)**
-
-Total Spot Cost (USD):
-Cost = Sum of (Spot Price * (Longest Run Duration (seconds) / 3600)) for all instances.
-
-- Use Spot price history for each `InstanceID` to calculate the cost.
-- Multiply the **longest `RunDurationSeconds`** by the **Spot price** for the region.
-
-#### **3. Estimated Cost Saving**
-
-Estimated Cost Savings = Total On-Demand cost - Total Spot cost
+### Outputs:
+- **`SpotViewerEC2InstanceId`**: ID of the EC2 instance hosting the Spot Viewer.
+- **`PublicIP`**: Public IP of the EC2 instance for accessing the web interface.
 
 ---
 
-### Example Response
+## **Steps to Use**
 
-```json
-{
-  "NumberOfJobs": 120,
-  "NumberOfRetries": 15,
-  "TotalRunTime": 240000,
-  "JobQueueName": ["DefaultQueue"],
-  "TotalOnDemandCost": 100.75,
-  "TotalSpotCost": 28.50,
-  "EstimatedCostSaving": 72.25
-}
-```
-Notes
-	•	Monetary values are rounded to two decimal places for better readability.
-	•	Savings are calculated as the difference between On-Demand and Spot costs.
-	•	Job Queue Name(s) are returned as a list of unique strings.
+1. **Deploy Stack 1**:
+   - Use AWS CloudFormation to deploy the Analytics stack.
+   - Provide the required parameters: `UniquePrefix` and `BatchComputeEnvironmentName`.
 
+2. **Deploy Stack 2** (Optional):
+   - Use AWS CloudFormation to deploy the Spot Viewer stack.
+   - Provide the required parameters: `UniquePrefix`, `VpcId`, `SubnetId`, and `KeyName`.
+
+3. **Access Spot Viewer**:
+   - Get the **Public IP** from the stack outputs or EC2 dashboard.
+   - Open the following URLs in a browser:
+     - **On-Demand Metrics**: `http://<ip_address>:5005/on-demand.html`
+     - **Spot Metrics**: `http://<ip_address>:5005/spot.html`
 
 ---
 
-### Additional Notes
-1. Ensure to serve these markdown files alongside your API for better documentation.
-2. The values for Spot prices and On-Demand prices should be dynamically fetched based on AWS Pricing APIs to ensure accuracy.
+## Additional Information
+
+- **Source Code**:
+  - API-level details: `doc/`
+  - Lambda and HTML code: `resources/`
+
+- **Note**: Make sure to use the same `UniquePrefix` across both stacks to ensure proper integration.
+
 
 ## License
 This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details
